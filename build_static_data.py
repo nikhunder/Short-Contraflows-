@@ -1,16 +1,3 @@
-"""Export the citywide analysis to a single static data.js file for the
-read-only public site (static_site/index.html). No Flask/Dash at runtime -
-GitHub Pages only serves static files, so this is a one-shot data dump, not
-a server. Re-run this after any pipeline/algorithm rebuild
-(../python/build_region.py --citywide) to refresh the public site's data.
-
-Chevron math (_tangent/chevron_coords) is copied verbatim from
-../python/app.py rather than imported, since importing app.py would build
-the whole Dash app as a side effect (it constructs app.layout at module
-scope) just to reach two small pure functions - this pair is already
-production-validated there, low risk of drift given how small and stable
-it is.
-"""
 import json
 import re
 from math import asin, cos, radians, sin, sqrt
@@ -28,71 +15,38 @@ EDIT_STATE_PATH = ROOT / "edit-state.json"
 BIKE_ROUTES_PATH = ROOT / "Bike_Routes_20260801.geojson"
 OUT_PATH = Path(__file__).parent / "data.js"
 
-ROUND = 6  # ~11cm precision - plenty, keeps the payload small
+ROUND = 6 
 
-# Segments to force to "none" regardless of recommend_action/edit-state.
-# Cell 809's "East 116th Street" (osm_55822, osm_55713) is 4 duplicate rows
-# in segments.parquet sharing the exact same fnode/tnode pair (a source-data
-# artifact, not a real second street) - since the live app's edit-state key
-# is fnode_id_tnode_id with no cell_id (a known collision issue, see
-# [[project_street_direction]] memory), Dash ends up with several segment
-# components sharing one id, so clicking never reliably reaches all of them
-# and the user can't reject it in the live app. Excluding it here directly
-# until the underlying duplicate-row/collision bug is fixed at the source.
 MANUAL_EXCLUDE = {
     ("osm_55822", "osm_55713"),
 }
-
-# Whole cells manually reviewed and rejected outright - force every segment
-# in these cells to "none" regardless of recommend_action/edit-state, same
-# rationale as MANUAL_EXCLUDE above but keyed by cell rather than by a
-# specific duplicate-row pair.
 MANUAL_EXCLUDE_CELLS = {841, 899, 418}
-
 
 def rd(coords):
     """Round a list of [lat, lon] pairs to ROUND decimals."""
     return [[round(lat, ROUND), round(lon, ROUND)] for lat, lon in coords]
 
-
 def line_latlngs(geom):
     x, y = geom.coords.xy
     return [[y[i], x[i]] for i in range(len(x))]
 
-
 def ring_latlngs(geom):
     x, y = geom.exterior.coords.xy
     return [[y[i], x[i]] for i in range(len(x))]
-
 
 def polygon_parts(geom):
     if geom.geom_type == "MultiPolygon":
         return [ring_latlngs(g) for g in geom.geoms]
     return [ring_latlngs(geom)]
 
-
 def is_locked(row):
     return row.dir_travel == "B" or bool(row.cdot_contraflow)
 
-
 def seg_key(row):
-    # Matches app.py's seg_key() exactly - fnode_id_tnode_id, no cell_id -
-    # so this export matches whatever the live app actually displays,
-    # including that key's known cross-cell collision quirk (see
-    # [[project_street_direction_osm_swap]]/memory: not fixed there, so not
-    # silently "fixed" here either - staying faithful to the live app is
-    # the whole point of this export).
     return f"{row.fnode_id}_{row.tnode_id}"
 
 
 def effective_action(row, edits):
-    # Mirrors app.py's effective_action()/save_changes(): a locked segment
-    # always reads "none" regardless of any (even stale) edit-state entry;
-    # otherwise an explicit edit-state override wins over the algorithm's
-    # own recommend_action - this is the user's actual REVIEWED decision,
-    # not just the raw algorithm guess, which is what the public site
-    # should show. Segments the user manually flagged with no algorithm
-    # recommendation at all (recommend_action == "none") are included too.
     if is_locked(row):
         return "none"
     if (row.fnode_id, row.tnode_id) in MANUAL_EXCLUDE:
@@ -102,14 +56,6 @@ def effective_action(row, edits):
     return edits.get(seg_key(row), {}).get("action", row.recommend_action)
 
 
-# --- Cross-street self-reference cleanup ---------------------------------
-#
-# Some cross_street_start/end values are themselves a "/"-joined pair from
-# a dogleg intersection (two street names meeting at slightly different
-# points treated as one node), and one of the two sometimes just repeats the
-# street being edited under a different abbreviation style (e.g. "E 85TH
-# ST" for a change on "East 85th Street"). "Between X and the street itself"
-# isn't a useful cross street, so strip whichever part matches.
 _SUFFIX_MAP = {
     "STREET": "ST", "AVENUE": "AVE", "BOULEVARD": "BLVD", "DRIVE": "DR",
     "PLACE": "PL", "ROAD": "RD", "PARKWAY": "PKWY", "COURT": "CT",
@@ -130,14 +76,6 @@ def _normalize_street(name):
 
 
 def strip_self_reference(cross_value, street_names):
-    """street_names is every distinct street name in the change being
-    described (a merged corridor may cover more than one), so a cross-field
-    part is stripped if it matches ANY of them, not just a single joined
-    label. Surviving parts are normalized (e.g. "South Essex Avenue" ->
-    "S ESSEX AVE") since cross-street fields mix fully-spelled-out and
-    already-abbreviated forms depending on which source segment they came
-    from, and showing both styles side by side in one "Between X and Y"
-    reads as if it's two different kinds of thing rather than two streets."""
     if not cross_value:
         return cross_value
     targets = {_normalize_street(n) for n in street_names}
@@ -145,19 +83,7 @@ def strip_self_reference(cross_value, street_names):
     kept = [_normalize_street(p) for p in parts if _normalize_street(p) not in targets]
     return " / ".join(kept) if kept else None
 
-
-# --- Near-miss node unification --------------------------------------------
-#
-# Two segments that touch at the same physical intersection should merge
-# into one change even when they're on different streets (a dogleg/jog), but
-# occasionally the shared intersection carries different fnode/tnode ids on
-# each side (rounding, or the OSM-swap id-collision issue - see
-# [[project_street_direction_osm_swap]]), which used to keep them from being
-# recognized as touching at all. Union any two distinct node ids within
-# MERGE_DIST_FT of each other so the connectivity graph below treats them as
-# one junction.
 MERGE_DIST_FT = 660.0  # 1/8 mile
-
 
 def _haversine_ft(p1, p2):
     lat1, lon1 = p1
@@ -168,7 +94,6 @@ def _haversine_ft(p1, p2):
     dlambda = radians(lon2 - lon1)
     a = sin(dphi / 2) ** 2 + cos(phi1) * cos(phi2) * sin(dlambda / 2) ** 2
     return 2 * r * asin(sqrt(a))
-
 
 class _UnionFind:
     def __init__(self):
@@ -188,14 +113,7 @@ class _UnionFind:
         if ra != rb:
             self.parent[ra] = rb
 
-
 def unify_nearby_nodes(rows):
-    # Only "loose end" node ids (degree 1 in the raw fnode/tnode graph) are
-    # merge candidates: a node already shared by two rows is a confirmed
-    # touch and needs no help, and a single segment's own two ends are never
-    # a real intersection no matter how short the block is (most Chicago
-    # blocks are well under 660ft, so comparing every node pair here without
-    # this guard unions a short segment's own endpoints with each other).
     degree, owner_row = {}, {}
     for row in rows:
         for n in (row.fnode_id, row.tnode_id):
@@ -225,14 +143,6 @@ def unify_nearby_nodes(rows):
                 candidates.append((dist, a, b))
     candidates.sort(key=lambda t: t[0])
 
-    # Union nearest pairs first, re-checking before each one: two nodes
-    # merging can transitively pull a THIRD node's segment closed into a
-    # self-loop even though no single pairwise check above ever compared
-    # that segment's two ends directly to each other (e.g. A-B touch at a
-    # real intersection, and a short unrelated segment C-D happens to have D
-    # within range of B too - unioning B and D would make C-D's own two ends
-    # share a root once D=B=A's neighborhood). Skip any union that would
-    # cause either endpoint's own segment to close on itself this way.
     dsu = _UnionFind()
     for _, a, b in candidates:
         ra, rb = dsu.find(a), dsu.find(b)
@@ -281,7 +191,6 @@ minx, miny, maxx, maxy = segments.total_bounds
 CENTER = [(miny + maxy) / 2, (minx + maxx) / 2]
 OVERALL_BOUNDS = [[miny, minx], [maxy, maxx]]
 
-# --- Direction chevrons - copied from python/app.py verbatim.
 LAT_SCALE = np.cos(np.radians(CENTER[0]))
 
 
@@ -334,17 +243,6 @@ print(f"  {n_overridden} segments differ from the raw algorithm recommendation "
       f"(rejected, manually added, or locked)")
 
 def split_into_chains(rows, unify):
-    """Decompose an entire action group (all reversal, or all contraflow,
-    rows citywide - not scoped to one cell or one connected component) into
-    maximal walkable chains, each a list of (row, forward) pairs. A chain
-    ends at any node where segment count != 2 - a dangling end (1) or a real
-    branch/junction (3+) - so a fork anywhere breaks into separate chains
-    fanning out from that point, rather than one stray junction disqualifying
-    every other segment merge in the same (now citywide-scale) connected
-    component the way a single all-or-nothing simple-path check would.
-    `unify(row)` returns a row's (fnode, tnode) after collapsing any nodes
-    within MERGE_DIST_FT of each other, so a shared-intersection touch is
-    recognized even when the two sides carry different raw node ids."""
     node_degree, node_segs = {}, {}
     for row in rows:
         for n in unify(row):
@@ -386,15 +284,6 @@ def split_into_chains(rows, unify):
 
 
 def merge_group(order):
-    """Combine a walk-ordered chain of segments into one change: one
-    continuous line, cross streets from the two outer ends, and one
-    proposed-direction chevron - only when every segment's proposed
-    (flipped) direction agrees on which way the merged run points, since a
-    real contraflow/reversal corridor should be coherent end to end. The
-    chain isn't required to stay on one street - a dogleg through a shared
-    intersection onto a different street is a single coherent change too,
-    so the label joins every distinct street name encountered along the
-    walk."""
     coords = []
     for row, forward in order:
         pts = line_latlngs(row.geometry)
@@ -404,11 +293,6 @@ def merge_group(order):
             pts = pts[1:]
         coords.extend(pts)
 
-    # Compare consecutive names in their normalized form, not raw string
-    # equality - full_name is occasionally inconsistent for the same real
-    # street (e.g. "South Parnell Avenue" on one segment, "S PARNELL AVE" on
-    # the next), which would otherwise show up as a bogus "Street A / Street
-    # A" join.
     names_in_order, names_norm = [], []
     for row, _ in order:
         nm = row.full_name if pd.notna(row.full_name) else None
@@ -500,9 +384,6 @@ print(f"  {len(CHANGES)} changes ({sum(1 for c in CHANGES if c['action']=='rever
       f"{n_merged} of which are merged multi-block runs")
 
 print("Building context layers (arterial/collector, bike routes, parks, control points, wards)...")
-# Simplified for payload size - these are background reference lines, not
-# the focus content (that's `changes`, kept at full precision) - a ~5.5m
-# tolerance is invisible at any zoom level a viewer would actually use.
 SIMPLIFY_TOL = 0.00005
 BOUNDING_ART = [
     {"line": rd(line_latlngs(row.geometry.simplify(SIMPLIFY_TOL))),
@@ -548,7 +429,7 @@ STOP_ALL = [[round(r.y, ROUND), round(r.x, ROUND)] for r in node_points_df[node_
 STOP_OTHER = [[round(r.y, ROUND), round(r.x, ROUND)] for r in node_points_df[node_points_df.control == "stop_other"].itertuples()]
 
 WARDS = {}
-WARD_SIMPLIFY_TOL = 0.0002  # ~22m - a background reference outline, not a precise legal boundary
+WARD_SIMPLIFY_TOL = 0.0002  
 for row in wards.itertuples():
     b = row.geometry.bounds
     simplified = row.geometry.simplify(WARD_SIMPLIFY_TOL, preserve_topology=True)
