@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chicago Street Direction Proposals</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="loading">Loading map data...</div>
+
+<div id="map"></div>
+
+<div id="sidebar">
+  <h1>Street Direction</h1>
+  <p class="subtitle">Proposed one-way reversals and contraflow bike lanes for Chicago's local streets, so cyclists reach the nearest signal or all-way stop by a legal route.</p>
+
+  <div class="field">
+    <label for="ward-select">Focus ward</label>
+    <select id="ward-select">
+      <option value="">All wards, citywide</option>
+    </select>
+    <div class="hint">Navigation below is scoped to the selected ward.</div>
+  </div>
+
+  <div class="field layer-toggles">
+    <label>Map layers</label>
+    <label class="toggle"><input type="checkbox" id="toggle-wards" checked> Ward boundaries</label>
+    <label class="toggle"><input type="checkbox" id="toggle-bike" checked> Bike lanes</label>
+    <label class="toggle"><input type="checkbox" id="toggle-stops" checked> Stop signs</label>
+    <label class="toggle"><input type="checkbox" id="toggle-signals" checked> Traffic signals</label>
+  </div>
+
+  <div class="legend">
+    <div><span class="sw line" style="background:#b5453d"></span>Arterial, classes 1 and 2</div>
+    <div><span class="sw line" style="background:#b8842a"></span>Minor arterial, class 3</div>
+    <div><span class="sw line" style="background:#111"></span>Recommended reversal</div>
+    <div><span class="sw line" style="background:#2f8f6a"></span>Recommended contraflow bike lane</div>
+    <div><span class="sw dot" style="background:#3d8bd4"></span>Signal</div>
+    <div><span class="sw dot" style="background:#d4913d"></span>All-way stop</div>
+    <div><span class="sw dot hollow" style="border-color:#d4913d"></span>Other stop sign</div>
+    <div><span class="sw dash"></span>Ward boundary</div>
+    <div><span class="sw chevron" style="color:#7a8a99">&#9656;</span>Current one-way direction</div>
+    <div><span class="sw chevron" style="color:#111">&#9656;</span>Proposed direction (reversal)</div>
+    <div><span class="sw chevron" style="color:#2f8f6a">&#9656;</span>Proposed contraflow direction</div>
+    <div><span class="sw bike protected"></span>Existing protected bike lane</div>
+    <div><span class="sw bike buffered"></span>Existing buffered bike lane</div>
+    <div><span class="sw bike lane"></span>Existing bike lane</div>
+    <div><span class="sw bike shared"></span>Existing marked shared lane</div>
+    <div><span class="sw bike greenway"></span>Existing neighborhood greenway</div>
+  </div>
+
+  <hr>
+
+  <div id="nav-counter">Loading...</div>
+
+  <div class="nav-buttons">
+    <button id="prev-btn">&lt; Prev</button>
+    <button id="next-btn">Next &gt;</button>
+  </div>
+  <div class="hint">Tip: left/right arrow keys also step between changes.</div>
+  <button id="show-all-btn" class="full-btn">Show all changes</button>
+
+  <hr>
+
+  <div id="change-info">Select a change to see its details.</div>
+</div>
+
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
