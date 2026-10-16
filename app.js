@@ -1,26 +1,49 @@
+// Street Direction, read-only public viewer. Plain Leaflet.js, no
+// framework - the interactive editor (../python/app.py) is Dash/React for
+// its click-heavy multi-session editing workflow, but this page only ever
+// needs to draw layers and step an index, so a hand-written render loop
+// here carries none of that earlier project's hand-rolled-JS risk (no
+// bearing/rotation math is done in this file - every chevron coordinate
+// is precomputed server-side by build_static_data.py and shipped as plain
+// coordinates to draw).
+
 const COLORS = { reversal: "#111111", contraflow: "#2f8f6a" };
+
 const renderer = L.canvas({ padding: 0.5 });
+
 const map = L.map("map", {
   center: DATA.meta.center,
   zoom: 11,
   preferCanvas: true,
 });
 
+// Explicit panes, low to high z-index, so stacking order is fixed
+// regardless of draw order: context lines, then road-name labels, then
+// the highlighted change + ward boundary, then control-point markers on
+// top of everything.
 map.createPane("linesPane").style.zIndex = 400;
 map.createPane("labelsPane").style.zIndex = 405;
 map.createPane("highlightPane").style.zIndex = 407;
 map.createPane("controlPane").style.zIndex = 410;
 map.getPane("labelsPane").style.pointerEvents = "none";
 
-L.tileLayer("https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png", {
+L.tileLayer("https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png?key=cb1_2y7m_1_548aa4aac63350462978d1a1", {
   attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
   pane: "tilePane",
 }).addTo(map);
 
-L.tileLayer("https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png", {
+L.tileLayer("https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png?key=cb1_2y7m_1_548aa4aac63350462978d1a1", {
   pane: "labelsPane",
 }).addTo(map);
 
+// --- Context layers (drawn once, never change) -----------------------
+//
+// Grouped into `contextLayer` and hidden below CONTEXT_MIN_ZOOM: at a
+// citywide/ward overview zoom, thousands of chevrons and control-point
+// dots visually bury the sparse highlighted changes, which defeats the
+// point of "Show all changes." Hidden until the user is one zoom level
+// short of the per-change view (maxZoom 16 in render()), so zooming in
+// on a cluster brings full context back exactly where they land.
 const CONTEXT_MIN_ZOOM = 15;
 const contextLayer = L.layerGroup();
 
@@ -36,19 +59,27 @@ function drawNamedLines(entries, color, weight, opacity) {
   return group;
 }
 
+// Parks (light fill, always visible - low visual weight, useful for
+// orientation even at a citywide zoom).
 for (const ring of DATA.parks) {
   L.polygon(ring, { color: "#2f8f4a", weight: 1, fillOpacity: 0.25, fillColor: "#2f8f4a",
                      interactive: false, renderer, pane: "linesPane" }).addTo(map);
 }
 
+// Minor arterial (class 3), then arterial (class 1-2) on top of it
 drawNamedLines(DATA.boundingCol, "#b8842a", 2, 0.85);
 drawNamedLines(DATA.boundingArt, "#b5453d", 3, 0.85);
 
+// Current one-way direction chevrons, every one-way street citywide
 for (const chevron of DATA.baseArrows) {
   L.polyline(chevron, { color: "#7a8a99", weight: 2, opacity: 0.9,
                          interactive: false, renderer, pane: "linesPane" }).addTo(contextLayer);
 }
 
+// Control points, drawn above the road-name labels. Stop signs and traffic
+// signals get their own toggleable layers (see the layer-toggle registry
+// below) rather than living in contextLayer, since the sidebar checkboxes
+// let a viewer hide them independently of zoom.
 function drawPoints(entries, radius, color, fillOpacity) {
   const group = L.layerGroup();
   for (const [lat, lon] of entries) {
@@ -72,6 +103,8 @@ function updateContextVisibility() {
 map.on("zoomend", updateContextVisibility);
 updateContextVisibility();
 
+// --- Ward selector ------------------------------------------------------
+
 const wardSelect = document.getElementById("ward-select");
 for (const num of Object.keys(DATA.wards).map(Number).sort((a, b) => a - b)) {
   const opt = document.createElement("option");
@@ -83,6 +116,15 @@ for (const num of Object.keys(DATA.wards).map(Number).sort((a, b) => a - b)) {
 function activeBounds() {
   return wardSelect.value ? DATA.wards[Number(wardSelect.value)].bounds : DATA.meta.bounds;
 }
+
+// Ward boundaries + number labels - hidden until zoomed in at least as
+// far as the "Focus ward" dropdown itself would zoom to. Checked every
+// individual ward's own fit-to-bounds zoom (map.getBoundsZoom) and they
+// cluster tightly at 13-15 (mostly 14) since Chicago's wards are all
+// similar in area by design - a fixed threshold, not one computed from
+// whatever bounds the map just flew to (that was tried first and was a
+// no-op, since flyToBounds always lands AT its own fit zoom, making
+// "zoom >= the zoom this exact flight targeted" always true).
 const WARD_MIN_ZOOM = 14;
 const wardBoundaryLayer = L.layerGroup();
 for (const [num, w] of Object.entries(DATA.wards)) {
@@ -97,6 +139,15 @@ for (const [num, w] of Object.entries(DATA.wards)) {
   }).addTo(wardBoundaryLayer);
 }
 
+// --- Existing CDOT bike facilities --------------------------------------
+//
+// Shown at the same zoom threshold as ward boundaries (rather than buried
+// in contextLayer behind CONTEXT_MIN_ZOOM) since they're a primary
+// reference layer, not incidental clutter. Styled by facility type - line
+// pattern carries the type so it reads in print/grayscale too, color alone
+// isn't overloaded with meaning, and a blue distinct from both the black
+// reversal and green contraflow proposal colors avoids implying a proposed
+// change.
 const BIKE_COLOR = "#1a6faa";
 const BIKE_STYLE = {
   protected: { dashArray: null, weight: 4 },
@@ -113,6 +164,13 @@ for (const route of DATA.bikeRoutes) {
                             renderer, pane: "linesPane" }).addTo(bikeLayer);
 }
 
+// --- Layer toggles -------------------------------------------------------
+//
+// Each of these four layers is still hidden below its own zoom threshold
+// (thousands of stop-sign/signal dots at a citywide zoom are as unreadable
+// as the chevrons contextLayer already guards against), but the sidebar
+// checkboxes let a viewer additionally turn any of them off outright -
+// the two conditions are ANDed together in updateLayerVisibility.
 const LAYER_TOGGLES = {
   wards: { layer: wardBoundaryLayer, minZoom: WARD_MIN_ZOOM, enabled: true },
   bike: { layer: bikeLayer, minZoom: WARD_MIN_ZOOM, enabled: true },
@@ -150,6 +208,8 @@ document.getElementById("toggle-signals").addEventListener("change", (e) => {
   updateLayerVisibility();
 });
 
+// --- The highlighted change (current selection) --------------------------
+
 let highlightLayer = L.layerGroup().addTo(map);
 
 function drawHighlight(change) {
@@ -160,6 +220,8 @@ function drawHighlight(change) {
   L.polyline(change.proposedChevron, { color, weight: 3, opacity: 1, interactive: false,
                                         pane: "highlightPane" }).addTo(highlightLayer);
 }
+
+// --- Navigation: step through changes one at a time, or see them all -----
 
 let activeChanges = DATA.changes;
 let currentIndex = 0;
